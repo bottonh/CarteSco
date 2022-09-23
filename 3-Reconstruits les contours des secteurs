@@ -1,0 +1,175 @@
+library(data.table)
+library(dplyr)
+library(rgdal)
+library(sf)
+library(rgeos)
+library(smoothr)
+library(maptools)
+library(stringr)
+
+# Nous avons donc à ce stade une base avec les adresses associées à des coordonnées (x,y) et à un code de collège.
+
+m_all <- rbind(fread("adresses_geoloc_coll_1.csv"),
+               fread("adresses_geoloc_coll_2.csv"))
+
+m_all[,lon:=gsub(",",".",lon)]
+m_all[,lon:=as.numeric(lon)]
+
+m_all[,lat:=gsub(",",".",lat)]
+m_all[,lat:=as.numeric(lat)]
+
+m_all <- m_all[, !"V1"]
+
+# RESTREINDRE LONG LAT # Enleve les points aberrants : restridtion avec sd et pas un seuil absolu car prend en compte al taille totale de la zone
+m_all_restr <- m_all[!is.na(m_all$Code_RNE) &
+                      !is.na(m_all$lon) & !is.na(m_all$lat),]%>%
+     group_by(Code_RNE)%>%
+     filter(lon < median(lon)+3*sd(lon) &
+                lon > median(lon)-3*sd(lon) &
+                lat < median(lat)+3*sd(lat) &
+                lat > median(lat)-3*sd(lat))
+
+xy <- m_all_restr[,c("lon","lat")]
+#
+spdf <- SpatialPointsDataFrame(coords = xy,
+                               data = m_all_restr,
+                               proj4string = CRS("+proj=longlat +datum=WGS84 +no_defs"))
+
+rm(m_all_restr)
+rm(m_all)
+
+# Passe des points projetés à des polygons 
+spdf <- spTransform(spdf,CRS("+init=epsg:3347"))
+#Cree un sf vide pour stocker 
+hull_sf <- st_sf(st_sfc())%>% 
+  st_set_crs("+proj=longlat +datum=WGS84 +no_defs")
+
+all_coll <- sort(unique(spdf$Code_RNE))
+
+#Boucle sur l'ensemble des collèges 
+for(coll_i in all_coll){
+  
+  #Selectionne les adresses ratachees au college coll_i
+  xy <- spdf[spdf$Code_RNE == coll_i,] %>% 
+    st_as_sf()%>%
+    sf::st_coordinates()%>%
+    as.data.frame()
+  
+  #Enleve les doublons
+  xy <- xy[!duplicated(xy[c(1,2)]),] 
+  
+  # Test si secteur en un bout ou deux distincts (ce qui fait bugger l'algo creant les polygons)
+  possibleError <- tryCatch(
+    alphahull::ashape(as.matrix(xy), alpha = 500),#350, si baisse ce parametre, polygones moins précis
+    error=function(e) e)
+  
+  #Si il y a une erreur, retourne un polygone vide, sinon continue
+  if(inherits(possibleError, "error")==T){
+    df_union_cast <- st_sf(Code_RNE=paste("ERROR",coll_i),
+                           geometry=st_sfc(st_polygon()))%>% 
+      st_set_crs("+proj=longlat +datum=WGS84 +no_defs")
+  }else{ # Sinon, on continue
+    #Calcule le polygone concave qui englobe
+    a <- alphahull::ashape(as.matrix(xy), alpha = 500)
+    
+    l <- list()
+    #Obtient les contours du polygone
+    if(nrow(a$edges) != 0){
+    for (i in 1:nrow(a$edges)) {
+      l[[i]] <-  sp::Line(rbind(a$edges[i, 3:4], a$edges[i, 5:6])) 
+    }
+    
+    a <- sp::SpatialLinesDataFrame(sp::SpatialLines(list(sp::Lines(l, as.character("1")))),
+                                   data.frame(Code_RNE =coll_i), match.ID = FALSE)
+    
+    loc_ALPHA <- sf::st_polygonize(sf::st_as_sf(a))
+    
+    #Transforme en polygons : https://stackoverflow.com/questions/57677412/sf-how-to-get-back-to-multipolygon-from-geometrycollection
+    geoms <- lapply( loc_ALPHA$geometry, `[` )
+    mp <- lapply( geoms, function(x) sf::st_multipolygon( x = x ) )
+    #Then create an sfc
+    sfc_mp <- sf::st_sfc( mp )
+    #and attach it to your object
+    loc_ALPHA$mp <- sfc_mp
+    loc_ALPHA <- sf::st_set_geometry( loc_ALPHA, sfc_mp )
+    
+    df_union_cast <- st_cast(loc_ALPHA, "POLYGON")%>%
+      st_union() %>% 
+      st_set_crs(spdf@proj4string)%>%
+      st_transform("+proj=longlat +datum=WGS84 +no_defs")%>%
+      st_sf()
+    
+    df_union_cast$Code_RNE <- coll_i
+    
+    }
+  }
+  hull_sf <- rbind(hull_sf,df_union_cast)
+  
+  print(paste(which(all_coll==coll_i),"sur",length(all_coll)))
+}
+
+#Pour ceux pour lesquels ca n'a pas marché, aggrege les points avec un buffer (code d'avant qui n'a pas tourné : )
+pc100km <- gBuffer( spdf[spdf$Code_RNE %in% gsub("ERROR ","",hull_sf$Code_RNE[substr(hull_sf$Code_RNE,1,5)=="ERROR"]),],
+                    width=50,
+                    byid=TRUE )
+pc100km <- spTransform(pc100km,CRS("+proj=longlat +datum=WGS84 +no_defs"))
+
+# Add data, and write to shapefile
+pc100km <- SpatialPolygonsDataFrame( pc100km, data=pc100km@data )
+
+#Uni
+pc100km_uni <- unionSpatialPolygons(pc100km,
+                                    IDs=pc100km@data$Code_RNE)
+
+pid <- sapply(slot(pc100km_uni, "polygons"), function(x) slot(x, "ID"))
+
+# Create dataframe with correct rownames
+p.df <- data.frame(Code_RNE=pid, row.names = pid)
+
+# Try coersion again and check class
+ p <- SpatialPolygonsDataFrame(pc100km_uni, p.df)
+
+ # fill holes smaller than 0.5km2
+p <- st_as_sf(p)
+
+area_thresh <- units::set_units(10, km^2)
+p <- fill_holes(p, threshold = area_thresh)
+
+#Simplifiy la geographie pour limiter la taille de l'objet geo
+
+p <- st_transform(p, 2163)
+p <- st_simplify(p, dTolerance = 25) %>% 
+      sf::st_transform("+proj=longlat +datum=WGS84 +no_defs")%>%as_Spatial()
+
+#Enleve les colleges du hull SF 
+hull_sf_SP <- as_Spatial(hull_sf[substr(hull_sf$Code_RNE,1,5)!="ERROR",])
+
+# Rbind les points et les hull
+hull_sf_SP <- rbind(hull_sf_SP,p)
+
+# CONTOURS COMMUNE
+cont_com <- sf::st_read("communes-20200101.shp")
+
+# BUG Dans certaines communes qui en devraient etre rattachées qu'à un seul collège (Secteur_unique=="O") mais qui le sont à plusieurs ... # Donc ajoute : duplicated(carte_sco$code_insee)== F
+
+# 3) MERGE LES COMMUNES OU L'ENSEMBLE DES RUES SONT RATTACHEES AU MEME COLLEGE : on prend le shapefile total de la commune plutot qu'aggregation d'adresse en milieu rural
+m_comm <- merge(cont_com[cont_com$insee %in% carte_sco$code_insee[carte_sco$Secteur_unique=="O"],],
+                carte_sco[carte_sco$Secteur_unique=="O" & duplicated(carte_sco$code_insee)== F,c("code_insee","Code_RNE")],
+              by.x="insee",by.y="code_insee")%>%as_Spatial()
+              
+# RBIND les deux SHP
+cont_sect_hull <- rbind(hull_sf_SP,m_comm[,c("Code_RNE")], makeUniqueIDs = TRUE)
+
+# Merge les communes (et bouts de ville) qui sont rattachées au même collège
+#change projection pour st_union
+cont_sect_hull <- st_as_sf(cont_sect_hull)%>%
+  st_transform(2163)
+
+cont_sect_hull <- cont_sect_hull %>%
+  group_by(Code_RNE) %>% 
+  summarize(geometry = st_union(geometry))
+
+st_crs(cont_sect_hull) <- 2163  
+cont_sect_hull_ok <- as_Spatial(cont_sect_hull)
+
+cont_sect_hull_ok <- spTransform(cont_sect_hull_ok, "+init=epsg:4326")
