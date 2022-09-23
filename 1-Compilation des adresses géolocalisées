@@ -1,0 +1,130 @@
+```
+library(data.table)
+library(dplyr)
+
+setwd("/Volumes/Seagate Expansion Drive/Taf/Carte_Scolaire/Data")
+
+#Importe les contours de la carte scolaire
+carte_sco <- fread("fr-en-carte-scolaire-colleges-publics.csv")
+
+#Importe la base adresse de l'ensemble des départements pour lesquels nous avons des indications sur la carte scolaire
+cadast <- data.frame()
+cadast_13 <- data.frame()
+cadast_13_cad <- data.frame()
+
+carte_sco$code_departement[nchar(carte_sco$code_departement)==1] <- paste0("0",carte_sco$code_departement[nchar(carte_sco$code_departement)==1])
+
+# Que la métropole dans un premier temps
+dep_cart_sco <- unique(carte_sco$code_departement[! carte_sco$code_departement %in% c("973","984")])%>%sort()
+
+cadast <- fread("https://adresse.data.gouv.fr/data/ban/adresses/latest/csv/adresses-france.csv.gz")
+
+for(i in dep_cart_sco){
+  # Adresses locales
+  cadast_13 <- rbind(cadast_13,fread(paste0("https://adresse.data.gouv.fr/data/adresses-locales/latest/csv/adresses-locales-",i,".csv.gz")))
+  # Adresses cadastre
+  cadast_13_cad <- rbind(cadast_13_cad,fread(paste0("https://adresse.data.gouv.fr/data/adresses-cadastre/latest/csv/adresses-cadastre-",i,".csv.gz")))
+}
+
+cadast[,adresse:=paste(numero,nom_voie,code_insee)]
+cadast_13[,adresse:=paste(numero,nomVoie,codeCommune)]
+cadast_13_cad[,adresse:=paste(numero,voie_nom,commune_code)]
+
+# Recupère aussi les données DVF pour avoir plus d'adresses :
+dvf_2020 <- fread("DVF/2020_full.csv")
+dvf_2020 <- dvf_2020[dvf_2020$code_departement %in% dep_cart_sco,
+                     c("adresse_numero","adresse_suffixe","adresse_nom_voie","adresse_code_voie","code_postal","code_commune","nom_commune","code_departement","ancien_code_commune","ancien_nom_commune","id_parcelle","longitude","latitude")]
+
+dvf_2019 <- fread("DVF/2019_full.csv")
+dvf_2019 <- dvf_2019[dvf_2019$code_departement %in% dep_cart_sco,
+                     c("adresse_numero","adresse_suffixe","adresse_nom_voie","adresse_code_voie","code_postal","code_commune","nom_commune","code_departement","ancien_code_commune","ancien_nom_commune","id_parcelle","longitude","latitude")]
+
+dvf_2018 <- fread("DVF/2018_full.csv")
+dvf_2018 <- dvf_2018[dvf_2018$code_departement %in% dep_cart_sco,
+                     c("adresse_numero","adresse_suffixe","adresse_nom_voie","adresse_code_voie","code_postal","code_commune","nom_commune","code_departement","ancien_code_commune","ancien_nom_commune","id_parcelle","longitude","latitude")]
+
+dvf_2017 <- fread("DVF/2017_full.csv")
+dvf_2017 <- dvf_2017[dvf_2017$code_departement %in% dep_cart_sco,
+                     c("adresse_numero","adresse_suffixe","adresse_nom_voie","adresse_code_voie","code_postal","code_commune","nom_commune","code_departement","ancien_code_commune","ancien_nom_commune","id_parcelle","longitude","latitude")]
+
+dvf_2016 <- fread("DVF/2016_full.csv")
+dvf_2016 <- dvf_2016[dvf_2016$code_departement %in% dep_cart_sco,
+                     c("adresse_numero","adresse_suffixe","adresse_nom_voie","adresse_code_voie","code_postal","code_commune","nom_commune","code_departement","ancien_code_commune","ancien_nom_commune","id_parcelle","longitude","latitude")]
+
+#Restreint la carte scolaire au departement 
+carte_sco_tlse <-  carte_sco[carte_sco$code_departement %in% dep_cart_sco,]
+rm(carte_sco)
+
+#Ajoute un zero aux premiers departements 
+carte_sco_tlse$code_insee[nchar(carte_sco_tlse$code_insee)==4]<-paste0(0,carte_sco_tlse$code_insee[nchar(carte_sco_tlse$code_insee)==4])
+
+# De base adresse = que la rue
+carte_sco_tlse[,adresse := paste(tolower(Type_et_Libelle),code_insee)]
+carte_sco_tlse$adresse <- gsub(" ","",carte_sco_tlse$adresse)
+
+# Recupere les coordonnées de l'ensemble des points de la base adresse de ces rues :
+cadast$adresse <- paste(tolower(cadast$nom_afnor),cadast$code_insee)
+cadast$adresse <- gsub(" ","",cadast$adresse)
+
+cadast_13$adresse <- paste(tolower(cadast_13$nomVoie),cadast_13$codeCommune)
+cadast_13$adresse <- gsub(" ","",cadast_13$adresse)
+
+# Corrige accents 
+cadast_13_cad$voie_nom <- gsub("Ã©","e",cadast_13_cad$voie_nom)
+cadast_13_cad$voie_nom <- gsub("Â°","",cadast_13_cad$voie_nom)
+cadast_13_cad$voie_nom <- gsub("Ã¨","e",cadast_13_cad$voie_nom)
+cadast_13_cad$voie_nom <- gsub("ã¢","a",cadast_13_cad$voie_nom)
+cadast_13_cad$voie_nom <- gsub("ã»","u",cadast_13_cad$voie_nom)
+cadast_13_cad$voie_nom <- gsub("ã«","e",cadast_13_cad$voie_nom)
+cadast_13_cad$voie_nom <- gsub("ãª","e",cadast_13_cad$voie_nom)
+cadast_13_cad$voie_nom <- gsub("'","",cadast_13_cad$voie_nom)
+cadast_13_cad$voie_nom <- gsub("ã´","o",cadast_13_cad$voie_nom)
+cadast_13_cad$voie_nom <- gsub("ã®","i",cadast_13_cad$voie_nom)
+cadast_13_cad$voie_nom <- gsub("-","",cadast_13_cad$voie_nom)
+cadast_13_cad$voie_nom <- gsub("ãª","e",cadast_13_cad$voie_nom)
+
+cadast_13_cad$adresse <- paste(tolower(cadast_13_cad$voie_nom),cadast_13_cad$commune_code)
+cadast_13_cad$adresse <- gsub(" ","",cadast_13_cad$adresse)
+
+# Corrige initiales type de voie
+dvf_2020$source <- "DVF_2020"
+dvf_2019$source <- "DVF_2019"
+dvf_2018$source <- "DVF_2018"
+dvf_2017$source <- "DVF_2017"
+dvf_2016$source <- "DVF_2016"
+
+dvf_all <- rbind(dvf_2020,dvf_2019,dvf_2018,dvf_2017,dvf_2016)
+rm(dvf_2020,dvf_2019,dvf_2018,dvf_2017,dvf_2016)
+
+dvf_all$adresse_nom_voie_OK <- dvf_all$adresse_nom_voie
+dvf_all$adresse_nom_voie_OK <- gsub("^AV ","avenue",dvf_all$adresse_nom_voie_OK)
+dvf_all$adresse_nom_voie_OK <- gsub("^RTE ","route",dvf_all$adresse_nom_voie_OK)
+dvf_all$adresse_nom_voie_OK <- gsub("^IMP ","impasse",dvf_all$adresse_nom_voie_OK)
+dvf_all$adresse_nom_voie_OK <- gsub("^ALL ","allee",dvf_all$adresse_nom_voie_OK)
+dvf_all$adresse_nom_voie_OK <- gsub("^BD ","boulevard",dvf_all$adresse_nom_voie_OK)
+dvf_all$adresse_nom_voie_OK <- gsub("^CHE ","chemin",dvf_all$adresse_nom_voie_OK)
+dvf_all$adresse_nom_voie_OK <- gsub("^PL ","place",dvf_all$adresse_nom_voie_OK)
+dvf_all$adresse_nom_voie_OK <- gsub("^PAS ","passage",dvf_all$adresse_nom_voie_OK)
+dvf_all$adresse_nom_voie_OK <- gsub("^PASS ","passage",dvf_all$adresse_nom_voie_OK)
+dvf_all$adresse_nom_voie_OK <- gsub("^PLA ","place",dvf_all$adresse_nom_voie_OK)
+
+dvf_all$adresse <- paste(tolower(dvf_all$adresse_nom_voie_OK),dvf_all$code_commune)
+dvf_all$adresse <- gsub(" ","",dvf_all$adresse)
+
+# Assemble l'ensemble des bases adresse
+cadast$source <- "BAN"
+cadast_13$source <- "Adresses Locales"
+cadast_13_cad$source <- "Adresses cadastre"
+names(cadast_13_cad)[names(cadast_13_cad)=="long"]<-"lon"
+names(dvf_all)[names(dvf_all)=="longitude"]<-"lon"
+names(dvf_all)[names(dvf_all)=="latitude"]<-"lat"
+names(dvf_all)[names(dvf_all)=="adresse_numero"]<-"numero"
+
+df_adresse <- rbind(cadast[,c("numero","adresse","lon","lat","source")],
+                    cadast_13[,c("numero","adresse","lon","lat","source")],
+                    cadast_13_cad[,c("numero","adresse","lon","lat","source")],
+                    dvf_all[,c("numero","adresse","lon","lat","source")])%>%unique()
+
+#Export ici 
+write.csv(df_adresse,"df_adresse.csv")
+```
