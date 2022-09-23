@@ -1,0 +1,137 @@
+
+library(data.table)
+library(dplyr)
+
+#Importe la base des adresses cree précédemment avec les coordonnées géo
+df_adresse <- fread("df_adresse.csv")
+
+# 1) MERGE LES RUES DONT L'ENSEMBLE EST RATTACHEE AU MEME COLLEGE
+df_adresse$id <- row.names(df_adresse)
+
+# Que la premiere moitié de la base 
+#df_adresse <- df_adresse[c(1:(nrow(df_adresse)/2-1)),]
+df_adresse <- df_adresse[c((nrow(df_adresse)/2):nrow(df_adresse)),]
+
+m_rue_tot <- merge(df_adresse, carte_sco_tlse[carte_sco_tlse$Secteur_unique!="O" &
+                                          carte_sco_tlse$No_de_voie_debut =="1" &
+                                          carte_sco_tlse$No_de_voie_fin =="9999"  ,c("adresse","Code_RNE")],
+              by="adresse")
+
+# 2) MERGE LES RUES OU SEULEMENT UNE PARTIE EST RELIEE A UN COLLEGE
+m_rue_part <- df_adresse[ ! df_adresse$id %in% m_rue_tot$id,]
+# Garde que les noms des rues qui figurent effectivement dans le decoupage de la carte scolaire
+# Perd 7 000 adresses
+m_rue_part <- m_rue_part[m_rue_part$adresse %in% carte_sco_tlse$adresse,]
+# Enleve ceux ne sont pas géolocalisés
+m_rue_part <- m_rue_part[!is.na(m_rue_part$lon) & !is.na(m_rue_part$lat),]
+# Enleve les observations pour lesquelles NA sur le numero de rue
+m_rue_part <- m_rue_part[!is.na(m_rue_part$numero),]
+
+# Corrige si ce n'est pas toute la rue qui est dans la zone.
+# Cree un DF avec les les rues dont seule une partie sont rattachés à un collège
+df_part <- data.frame(Code_RNE=carte_sco_tlse$Code_RNE[carte_sco_tlse$No_de_voie_debut!="1" |
+                         carte_sco_tlse$No_de_voie_fin !="9999"],
+                      adresse=carte_sco_tlse$adresse[carte_sco_tlse$No_de_voie_debut!="1" |
+                         carte_sco_tlse$No_de_voie_fin !="9999"],
+                      num_1=carte_sco_tlse$No_de_voie_debut[carte_sco_tlse$No_de_voie_debut!="1" |
+                         carte_sco_tlse$No_de_voie_fin !="9999"],
+                      num_2=carte_sco_tlse$No_de_voie_fin[carte_sco_tlse$No_de_voie_debut!="1" |
+                         carte_sco_tlse$No_de_voie_fin !="9999"],
+                      parite = carte_sco_tlse$Parite[carte_sco_tlse$No_de_voie_debut!="1" |
+                         carte_sco_tlse$No_de_voie_fin !="9999"])
+
+# Enleve les observations ou la commune entiere est rattachée au college
+df_part <- df_part[!is.na(df_part$num_1) & !is.na(df_part$num_2),]
+
+df_part$num_1 <- as.numeric(df_part$num_1)
+df_part$num_2 <- as.numeric(df_part$num_2)
+
+#Corrige les adresses pour lesquelles num1<num2
+
+num1_new <- df_part[df_part$num_1>df_part$num_2,]$num_1
+num2_new <- df_part[df_part$num_1>df_part$num_2,]$num_2
+
+df_part[df_part$num_1>df_part$num_2,]$num_1 <- num2_new
+df_part[df_part$num_1>df_part$num_2,]$num_2 <- num1_new
+
+# Garde que les adresses de la carte scolaire qui se retrouvent dans les base adresses géolocalisées
+df_part <- df_part[df_part$adresse%in%m_rue_part$adresse,]
+# et invsersement
+m_rue_part <- m_rue_part[m_rue_part$adresse%in%df_part$adresse,]
+
+#Cree un DF avec l'ensemble des adresses pour la base carte scolaire avce les numéros PAIRS ET IMPAIRS 
+#Au lieu d'avoir une ligne indiquant entre le numero 1 et 5, on fait 5 lignes avec un numero chacun pour 
+#pouvoir faire un merge plus rapidement qu'une boucle 
+
+# 1)  Pair et impair
+df_part_pair_imp <- df_part[df_part$parite == "PI",]
+
+#Combien de fois l'adresse est repetee
+df_part_pair_imp$rep_num <- df_part_pair_imp$num_2 - df_part_pair_imp$num_1 +1
+
+#Repete les adresses et colleges le bon nb de fois
+df_part_pair_imp <- df_part_pair_imp[rep(seq(nrow(df_part_pair_imp)), df_part_pair_imp$rep_num),]
+
+#Indique un numero de rue unique
+df_part_pair_imp <- df_part_pair_imp %>%
+  group_by(sub("\\..*", "", rownames(df_part_pair_imp)))%>%
+  mutate(num_ = seq(unique(num_1),unique(num_2),1))%>%
+  ungroup()%>%
+  dplyr::select(adresse,Code_RNE,num_)%>%
+  # Supprime les doublons : pour une meme rue, une observation attachant au meme college du num 1 à 7 et du num 1 à 30, la première 
+# est inclus dans l'autre
+  unique()
+
+# 2)  Pair
+df_part_pair <- df_part[df_part$parite == "P",]
+
+#Combien de fois l'adresse est repetee : divise par deux car on veut que les chiffres pairs
+df_part_pair$rep_num <- (df_part_pair$num_2 - df_part_pair$num_1)/2 +1
+
+#Repete les adresses et colleges le bon nb de fois
+df_part_pair <- df_part_pair[rep(seq(nrow(df_part_pair)), df_part_pair$rep_num),]
+
+#Indique un numero de rue unique
+df_part_pair <- df_part_pair %>%
+  group_by(sub("\\..*", "", rownames(df_part_pair)))%>%
+  mutate(num_ = seq(unique(num_1),unique(num_2),2))%>%
+  ungroup()%>%
+  dplyr::select(adresse,Code_RNE,num_)%>%
+  # Supprime les doublons : pour une meme rue, une observation attachant au meme college du num 1 à 7 et du num 1 à 30, la première 
+# est inclus dans l'autre
+  unique()
+
+# 3)  Impair
+df_part_IMpair <- df_part[df_part$parite == "I",]
+
+#Combien de fois l'adresse est repetee : divise par deux car on veut que les chiffres pairs
+df_part_IMpair$rep_num <- (df_part_IMpair$num_2 - df_part_IMpair$num_1)/2 +1
+
+#Repete les adresses et colleges le bon nb de fois
+df_part_IMpair <- df_part_IMpair[rep(seq(nrow(df_part_IMpair)), df_part_IMpair$rep_num),]
+
+#Indique un numero de rue unique
+df_part_IMpair <- df_part_IMpair %>%
+  group_by(sub("\\..*", "", rownames(df_part_IMpair)))%>%
+  mutate(num_ = seq(unique(num_1),unique(num_2),2))%>%
+  ungroup()%>%
+  dplyr::select(adresse,Code_RNE,num_)%>%
+  # Supprime les doublons : pour une meme rue, une observation attachant au meme college du num 1 à 7 et du num 1 à 30, la première 
+# est inclus dans l'autre
+  unique()
+
+# Réunit les 3
+df_part <- rbind(df_part_IMpair,df_part_pair)
+rm(df_part_IMpair,df_part_pair)
+df_part <- rbind(df_part,df_part_pair_imp)
+rm(df_part_pair_imp)
+
+# Merge les adresses geolocalisees aux adresses associees a un college 
+m_rue_part <- merge(m_rue_part,df_part,by.x=c("numero","adresse"),by.y=c("num_","adresse"))
+
+# Réunit l'ensemble des dataframes
+m_all <- rbind(m_rue_tot,m_rue_part)
+
+#Exporte la base des adresses totales en deux fois ca c'est lourd 
+#write.csv2(m_all,"adresses_geoloc_coll_1.csv") # df_adresse <- df_adresse[c(1:(nrow(df_adresse)/2)),]
+#write.csv2(m_all,"adresses_geoloc_coll_2.csv") # df_adresse <- df_adresse[c((nrow(df_adresse)/2):nrow(df_adresse)),]
