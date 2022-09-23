@@ -1,0 +1,157 @@
+library(data.table)
+library(dplyr)
+library(rgdal)
+library(sf)
+library(rgeos)
+library(smoothr)
+library(maptools)
+library(stringr)
+library(leaflet)
+library(readxl)
+library(foreach)
+library(doParallel)
+
+#Importe base des carreaux (revenus 2017)
+listeIndic <- unique(c("Men","Men_pauv","Idcar_200m","lcog_geo","Ind","I_est_200")) 
+
+carreaux_ALL <- data.table::fread("/Volumes/Seagate Expansion Drive/Taf/Carte_Scolaire/Data/Filosofi2017_carreaux_200m_csv/Filosofi2017_carreaux_200m_met.csv", 
+                              select = c(listeIndic)) %>%
+  dplyr::mutate(I_est_cr = as.integer(I_est_200))
+
+setnames(carreaux_ALL, "Idcar_200m", "IdINSPIRE")
+setnames(carreaux_ALL, "lcog_geo", "Depcom")
+setnames(carreaux_ALL, "I_est_200", "I_est_cr")
+
+#Pour chaque careaux recupere xmin, xmax, ymin, ymax
+epsg <- as.integer(str_sub(str_extract(carreaux_ALL[1,]$IdINSPIRE, "CRS\\d+"), 4))
+
+tailleCarreaux <- unlist(lapply(X = carreaux_ALL$IdINSPIRE, FUN = function(ligne){
+  return(as.integer(str_sub(str_extract(ligne, "RES\\d+"), 4)))
+}))
+
+carreaux_ALL$xmin <- unlist(lapply(X = carreaux_ALL$IdINSPIRE, FUN = function(ligne){
+  return(as.integer(str_sub(str_extract(ligne, "E\\d+"), 2)))
+}))
+
+carreaux_ALL$ymin <- unlist(lapply(X = carreaux_ALL$IdINSPIRE, FUN = function(ligne){
+  return(as.integer(str_sub(str_extract(ligne, "N\\d+"), 2)))
+}))
+
+carreaux_ALL$xmax <- carreaux_ALL$xmin + tailleCarreaux
+carreaux_ALL$ymax <- carreaux_ALL$ymin + tailleCarreaux
+
+#Importe données iris
+#df_iris_ALL <- read_excel("/Volumes/Seagate Expansion Drive/Taf/Carte_Scolaire/Data/BASE_TD_FILO_DISP_IRIS_2015.xls")
+df_iris_ALL <- read_excel("/Volumes/Seagate Expansion Drive/Taf/Carte_Scolaire/Data/BASE_TD_FILO_DISP_IRIS_2017.xlsx")
+df_iris_ALL <- df_iris_ALL[-c(1:4),]
+names(df_iris_ALL) <- df_iris_ALL[1,]
+df_iris_ALL <- df_iris_ALL[-c(1),]
+
+#Importe shp iris, transforme en projection des carreaux
+cont_iris_ALL <- st_read("/Volumes/Seagate Expansion Drive/Taf/Carte_Scolaire/Data/CONTOURS-IRIS_2-1__SHP__FRA_2017-06-30/CONTOURS-IRIS_2-1__SHP__FRA_2017-06-30/CONTOURS-IRIS/1_DONNEES_LIVRAISON_2016/CONTOURS-IRIS_2-1_SHP_LAMB93_FE-2016/CONTOURS-IRIS.shp") %>%
+    st_transform(3035)%>%
+  st_buffer(0)
+
+cont_iris_ALL <- merge(cont_iris_ALL,df_iris_ALL[,c("IRIS","DISP_TP6015")],by.x="CODE_IRIS",by.y="IRIS")
+
+cont_iris_ALL <- cont_iris_ALL[!is.na(cont_iris_ALL$DISP_TP6015),]
+
+#setup parallel backend to use many processors
+cores=detectCores()
+cl <- makeCluster(cores[1]-1) #not to overload your computer
+registerDoParallel(cl)
+
+Sys.time()
+
+vect_PAUV <- foreach(i=1:nrow(cont_iris_ALL),.packages="sf") %dopar% {
+    
+ #bbox du secteur et y ajoute la taille d'un carreau pour capter les carreaux qui ne seraient pas compris integralement dans la bbox mais en partie 
+xmin_sect <- st_bbox(cont_iris_ALL[i,])[1] - tailleCarreaux %>% unique()
+ymin_sect <- st_bbox(cont_iris_ALL[i,])[2] - tailleCarreaux %>% unique()
+xmax_sect <- st_bbox(cont_iris_ALL[i,])[3] + tailleCarreaux %>% unique()
+ymax_sect <- st_bbox(cont_iris_ALL[i,])[4] + tailleCarreaux %>% unique()
+
+#Garde que les carreaux qui sont dedans
+carreaux_i <- carreaux_ALL[carreaux_ALL$xmin >= xmin_sect & 
+                             carreaux_ALL$xmax <= xmax_sect &
+                             carreaux_ALL$ymin >= ymin_sect & 
+                             carreaux_ALL$ymax <= ymax_sect ,]
+
+#Cree les carreaux en objet geo (en reprenant code site insee)
+carreaux_i$geometry <- sprintf("POLYGON ((%i %i, %i %i, %i %i, %i %i, %i %i))", 
+                             carreaux_i$xmin, 
+                             carreaux_i$ymin, 
+                             carreaux_i$xmax, 
+                             carreaux_i$ymin, 
+                             carreaux_i$xmax, 
+                             carreaux_i$ymax, 
+                             carreaux_i$xmin, 
+                             carreaux_i$ymax, 
+                             carreaux_i$xmin, 
+                             carreaux_i$ymin) 
+
+carreaux_i_sf <- sf::st_as_sf(carreaux_i, wkt = "geometry", crs = epsg)
+
+#Pour chaque carreau fait l'union pour voir la surface de chaque carreau qui est intersectée par le secteur 
+carreaux_i_sf_inter <- st_intersection(carreaux_i_sf,cont_iris_ALL[i,])
+rm(carreaux_i_sf)
+
+#Par de la surface intersectee
+carreaux_i_sf_inter$sh_inter <- as.numeric(st_area(carreaux_i_sf_inter))/40000
+
+carreaux_i_sf_inter$Men_inter <- carreaux_i_sf_inter$Men * carreaux_i_sf_inter$sh_inter
+carreaux_i_sf_inter$Men_pauv_inter <- carreaux_i_sf_inter$Men_pauv * carreaux_i_sf_inter$sh_inter
+
+print(paste(sum(carreaux_i_sf_inter$Men_inter),"|",
+            sum(carreaux_i_sf_inter$Men_pauv_inter),"#",
+            sd(carreaux_i_sf_inter$Men_pauv_inter*100/carreaux_i_sf_inter$Men_inter)))
+
+}
+
+#stop cluster
+stopCluster(cl)
+Sys.time() # 1h20 pour tourner
+
+cont_iris_ALL$nb_Men <- sub("\\|.*", "", vect_PAUV)
+cont_iris_ALL$nb_Men <- gsub(" ","",cont_iris_ALL$nb_Men)%>%
+  as.numeric()
+
+cont_iris_ALL$nb_Men_pauv <- sub("\\#.*", "", vect_PAUV)
+cont_iris_ALL$nb_Men_pauv <- sub(".*\\|", "", cont_iris_ALL$nb_Men_pauv)
+cont_iris_ALL$nb_Men_pauv <- gsub(" ","",cont_iris_ALL$nb_Men_pauv)%>%
+  as.numeric()
+
+cont_iris_ALL$sd_TP <-  sub(".*\\#", "", vect_PAUV)
+cont_iris_ALL$sd_TP <- gsub(" ","",cont_iris_ALL$sd_TP)%>%
+  as.numeric()
+
+cont_iris_ALL$TP <- cont_iris_ALL$nb_Men_pauv*100/cont_iris_ALL$nb_Men
+
+#Gap 
+plot(cont_iris_ALL$DISP_TP6015,cont_iris_ALL$TP,ylim=c(0,100),xlim=c(0,100),main="")
+abline(0,1)
+
+cont_iris_ALL$DISP_TP6015 <- as.numeric(cont_iris_ALL$DISP_TP6015)
+
+summary(lm(TP~DISP_TP6015,data = cont_iris_ALL))
+
+#Essaye CALAGE
+cont_iris_ALL$decil <- with(cont_iris_ALL,cut(DISP_TP6015,
+                                      breaks = quantile(DISP_TP6015,probs = seq(0,1,by=0.05),
+                                                        na.rm = T),
+                                      include.lowest = T))
+
+cont_iris_ALL$diff <- cont_iris_ALL$TP - cont_iris_ALL$DISP_TP6015
+
+#Ecart médian par decile
+secteurs_DECILE <- cont_iris_ALL %>%
+  st_set_geometry(NULL)%>%
+  group_by(decil)%>%
+  mutate(pauv_diff_AGR = median(diff))%>%
+  select(decil,pauv_diff_AGR)%>%
+  unique()%>%
+  arrange(decil)
+
+cont_iris_ALL <- merge(cont_iris_ALL,secteurs_DECILE,by="decil",all.x=T)
+
+cont_iris_ALL$TPAUV_CORR <- cont_iris_ALL$TP - cont_iris_ALL$pauv_diff_AGR
