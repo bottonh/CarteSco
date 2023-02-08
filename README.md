@@ -6,7 +6,7 @@ Reconstruction des contours de la carte scolaire des collèges à l'échelle nat
 
 ![image](https://user-images.githubusercontent.com/48832201/191748393-3be47b10-a944-4928-9d49-7dc1fd8c6f05.png)
 
-La première étape consiste donc à transformer cette table en un fichier géographique en géolocalisant les adresses. Pour cela, les adresses du fichier de la carte scolaire ont été associées à des bases de données associant des coordonnées géographiques à une adresse ([Base Adresse Nationale](https://adresse.data.gouv.fr/),[DVF entre 2016 et 2019](https://adresse.data.gouv.fr/)). 
+La première étape consiste donc à transformer cette table en un fichier géographique en géolocalisant les adresses. Pour cela, les adresses du fichier de la carte scolaire ont été associées à des bases de données associant des coordonnées géographiques à une adresse ([Base Adresse Nationale](https://adresse.data.gouv.fr/),[DVF entre 2016 et 2019](https://www.data.gouv.fr/fr/datasets/demandes-de-valeurs-foncieres/)). 
 
 Nous obtenons ainsi **8 505 836 adresses géolocalisés que nous pouvons associer à leur collège public de secteur**. 
 
